@@ -1,0 +1,26 @@
+# Real Estate Market Analyzer & Prediction Tool
+**UTD UTDesign - Group 13**
+
+## Project Overview
+This project develops a customized real estate market analyzer equipped with an interactive graphical user interface (GUI). It addresses the lack of high-performing, accessible tools for everyday buyers and sellers by decoding complex property trends and forecasting market fluctuations.
+
+## Core Architecture
+We utilize a hybrid machine learning approach to capture both immediate property value and future market momentum:
+* **Micro-Pricing (XGBoost):** Predicts current fair market values of specific properties based on cross-sectional physical characteristics (square footage, age) and hyper-local geography.
+* **Macro-Forecasting (LSTM):** Forecasts broader market and neighborhood price trajectories (6–12 months out) using historical time-series data and dynamic economic indicators (interest rates, market sentiment).
+
+## Data Sources
+* **Redfin DFW Dataset:** Provides static micro-data (beds, baths, square footage, coordinates).
+* **Zillow Economics Data (ZHVI):** Provides historical baseline appreciation trends.
+* **Dynamic APIs:** FRED (Federal Reserve Economic Data) for live interest rates, and local APIs for live sentiment and neighborhood statistics.
+
+## Project Structure
+* `data/` - Raw and processed datasets (Ignored by Git)
+* `notebooks/` - Exploratory Data Analysis (EDA) and initial pipeline testing
+* `src/` - Core Python scripts for data processing, feature engineering, and model training
+* `models/` - Saved model weights (Ignored by Git)
+
+## Setup and Installation
+1. Clone the repository:
+   ```bash
+   git clone [https://github.com/husseinalkhafaji02/UTD-Design-Group-13.git](https://github.com/husseinalkhafaji02/UTD-Design-Group-13.git)
