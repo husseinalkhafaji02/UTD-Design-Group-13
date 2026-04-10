@@ -2,6 +2,22 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import os
+import pandas_datareader.data as web
+
+
+def load_historical_mortgage_rates(start_date, end_date):
+    """Load monthly 30-year mortgage rates from FRED and align to month-end."""
+    try:
+        rates = web.DataReader('MORTGAGE30US', 'fred', start_date, end_date)
+        rates = rates.reset_index()
+        rates.columns = ['Date', 'HISTORICAL_MORTGAGE_RATE']
+        rates['Date'] = pd.to_datetime(rates['Date'])
+        rates = rates.set_index('Date').resample('M').mean().reset_index()
+        rates['HISTORICAL_MORTGAGE_RATE'] = rates['HISTORICAL_MORTGAGE_RATE'].ffill().bfill()
+        return rates
+    except Exception as e:
+        print(f"Warning: Failed to load FRED mortgage rates, using fallback trend. Error: {e}")
+        return None
 
 def prep_zillow_data(filepath, lookback_window=12):
     print("Loading raw Zillow time-series data...")
@@ -15,24 +31,49 @@ def prep_zillow_data(filepath, lookback_window=12):
     if 'RegionName' in df.columns:
         dallas_data = df[df['RegionName'].astype(str).str.contains('Dallas', na=False, case=False)]
         if not dallas_data.empty:
-            # If Dallas is found, group by date in case there are multiple Dallas sub-regions
-            df = dallas_data.groupby('Date')['ZHVI_AllHomes'].mean().reset_index()
+            # Use a robust monthly median aggregation to reduce outlier-heavy cross-section distortion.
+            monthly = dallas_data.groupby('Date').agg(
+                ZHVI_AllHomes=('ZHVI_AllHomes', 'median'),
+                OBS_COUNT=('ZHVI_AllHomes', 'size')
+            ).reset_index()
+            df = monthly
     
     df = df.sort_values('Date').reset_index(drop=True)
+
+    # 2b. Sanity checks and anomaly clipping on monthly changes.
+    if 'OBS_COUNT' in df.columns:
+        min_obs = int(df['OBS_COUNT'].min())
+        print(f"Dallas monthly sample-count min: {min_obs}")
+
+    pct_change = df['ZHVI_AllHomes'].pct_change()
+    valid_pct = pct_change.dropna()
+    if len(valid_pct) > 0:
+        clip_low, clip_high = valid_pct.quantile([0.01, 0.99])
+        clipped_pct = pct_change.clip(lower=clip_low, upper=clip_high).fillna(0.0)
+        df['ZHVI_AllHomes_CLEAN'] = df['ZHVI_AllHomes'].iloc[0] * (1 + clipped_pct).cumprod()
+        clipped_count = int(((pct_change < clip_low) | (pct_change > clip_high)).sum())
+        print(
+            f"Clipped {clipped_count} monthly ZHVI jumps using 1%-99% pct-change bounds "
+            f"[{clip_low:.4f}, {clip_high:.4f}]"
+        )
+    else:
+        df['ZHVI_AllHomes_CLEAN'] = df['ZHVI_AllHomes']
     
     # 3. Engineer Historical Macro Vectors
     print("Engineering Historical Macro Vectors (Interest Rates & Sentiment)...")
-    # To match historical Zillow dates, we simulate the historical trends of our dynamic features
-    np.random.seed(42)
-    
-    # Simulating a historical mortgage rate cycle (fluctuating roughly between 3% and 7%)
-    df['HISTORICAL_MORTGAGE_RATE'] = 5.0 + np.sin(np.arange(len(df)) / 12) * 2.0
-    
-    # Simulating historical regional news sentiment (-1.0 to 1.0)
-    df['MACRO_SENTIMENT_SCORE'] = np.random.uniform(-0.5, 0.8, len(df))
+    mortgage_df = load_historical_mortgage_rates(df['Date'].min(), df['Date'].max())
+    if mortgage_df is not None:
+        df = df.merge(mortgage_df, on='Date', how='left')
+        df['HISTORICAL_MORTGAGE_RATE'] = df['HISTORICAL_MORTGAGE_RATE'].ffill().bfill()
+    else:
+        # Fallback trend if FRED is unavailable.
+        df['HISTORICAL_MORTGAGE_RATE'] = 5.0 + np.sin(np.arange(len(df)) / 12) * 1.0
+
+    # Keep sentiment neutral until a real historical feed is integrated.
+    df['MACRO_SENTIMENT_SCORE'] = 0.0
     
     # Our 3 LSTM feature vectors
-    features = ['ZHVI_AllHomes', 'HISTORICAL_MORTGAGE_RATE', 'MACRO_SENTIMENT_SCORE']
+    features = ['ZHVI_AllHomes_CLEAN', 'HISTORICAL_MORTGAGE_RATE', 'MACRO_SENTIMENT_SCORE']
     data_matrix = df[features].values
     
     # 4. Scale the Data (Crucial for Deep Learning)

@@ -3,6 +3,22 @@ import numpy as np
 from datetime import datetime
 import pandas_datareader.data as web
 
+DEFAULT_EXTERNAL_FEATURE_MODE = 'simulated'
+
+DEFAULT_POIS = [
+    {'name': 'DFW Transit Hub', 'lat': 32.8975, 'lon': -97.0403, 'category': 'transit'},
+    {'name': 'Dallas CBD', 'lat': 32.7767, 'lon': -96.7970, 'category': 'retail'},
+    {'name': 'Medical District', 'lat': 32.8116, 'lon': -96.8380, 'category': 'hospital'},
+    {'name': 'Plano ISD Anchor', 'lat': 33.0198, 'lon': -96.6989, 'category': 'school'}
+]
+
+POI_CATEGORY_WEIGHTS = {
+    'school': 0.30,
+    'transit': 0.30,
+    'hospital': 0.20,
+    'retail': 0.20
+}
+
 def load_and_clean_redfin(filepath):
     print("Loading raw Redfin data...")
     df = pd.read_csv(filepath)
@@ -47,15 +63,55 @@ def engineer_xgboost_vectors(df, user_poi_lat=32.9866, user_poi_lon=-96.7503):
         df = df.drop(columns=['YEAR BUILT']) 
         
     print(f"Calculating dynamic distances to POI ({user_poi_lat}, {user_poi_lon})...")
-    df['DISTANCE_TO_POI'] = haversine_distance(
+    df['DISTANCE_TO_POI_SINGLE'] = haversine_distance(
         df['LATITUDE'], df['LONGITUDE'], 
         user_poi_lat, user_poi_lon
     )
+
+    distance_frames = []
+    for poi in DEFAULT_POIS:
+        series = haversine_distance(df['LATITUDE'], df['LONGITUDE'], poi['lat'], poi['lon'])
+        distance_frames.append(
+            pd.DataFrame(
+                {
+                    'distance': series,
+                    'weight': POI_CATEGORY_WEIGHTS.get(poi['category'], 0.25)
+                }
+            )
+        )
+
+    stacked_distances = np.column_stack([frame['distance'].to_numpy() for frame in distance_frames])
+    df['DISTANCE_TO_POI_MULTI_MIN'] = stacked_distances.min(axis=1)
+
+    top_n = min(3, stacked_distances.shape[1])
+    sorted_distances = np.sort(stacked_distances, axis=1)
+    df['DISTANCE_TO_POI_MULTI_MEAN_TOP_N'] = sorted_distances[:, :top_n].mean(axis=1)
+    df['POI_COUNT_WITHIN_1_MI'] = (stacked_distances <= 1.0).sum(axis=1)
+    df['POI_COUNT_WITHIN_3_MI'] = (stacked_distances <= 3.0).sum(axis=1)
+
+    weighted_num = np.zeros(len(df), dtype=float)
+    weighted_den = np.zeros(len(df), dtype=float)
+    for frame in distance_frames:
+        proximity = 1.0 / (frame['distance'].to_numpy() + 0.1)
+        weighted_num += frame['weight'].to_numpy() * proximity
+        weighted_den += frame['weight'].to_numpy()
+    df['DISTANCE_TO_POI_MULTI_WEIGHTED'] = weighted_num / np.maximum(weighted_den, 1e-8)
+
+    # Backward-compatible alias while migrating downstream code.
+    df['DISTANCE_TO_POI'] = df['DISTANCE_TO_POI_SINGLE']
     
     print("Pinging Simulated Local Municipal API for 90-day crime data...")
-    df['LOCAL_CRIME_INDEX'] = df.apply(
+    df['LOCAL_CRIME_INDEX_SIM'] = df.apply(
         lambda row: fetch_local_crime_index(row['LATITUDE'], row['LONGITUDE']), axis=1
     )
+
+    # Placeholder columns for future external integration; keep schema stable now.
+    df['LOCAL_CRIME_INDEX_REAL'] = np.nan
+    df['LOCAL_CRIME_DATA_AGE_DAYS'] = np.nan
+    df['LOCAL_CRIME_SNAPSHOT_IS_STALE'] = 1
+
+    # Backward-compatible alias while migrating downstream code.
+    df['LOCAL_CRIME_INDEX'] = df['LOCAL_CRIME_INDEX_SIM']
     
     return df
 
@@ -95,6 +151,56 @@ def fetch_current_mortgage_rate():
         print(f"Could not fetch rate. Using fallback default. Error: {e}")
         return 6.5 
 
+def sanitize_feature_vectors(df):
+    print("Running anomaly cleanup for feature vectors...")
+    start_rows = len(df)
+
+    numeric_columns = [
+        'PRICE', 'SQUARE FEET', 'LOT SIZE', 'BEDS', 'BATHS',
+        'HOA/MONTH', 'LATITUDE', 'LONGITUDE', 'PROPERTY_AGE'
+    ]
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    if 'LOT SIZE' in df.columns:
+        df['LOT SIZE'] = df['LOT SIZE'].fillna(df['LOT SIZE'].median())
+
+    required = ['PRICE', 'SQUARE FEET', 'BEDS', 'BATHS', 'LATITUDE', 'LONGITUDE']
+    df = df.dropna(subset=[col for col in required if col in df.columns])
+
+    base_mask = (
+        (df['PRICE'] > 0) &
+        (df['SQUARE FEET'] >= 200) &
+        (df['BEDS'] > 0) &
+        (df['BATHS'] > 0) &
+        (df['LATITUDE'].between(24, 50)) &
+        (df['LONGITUDE'].between(-125, -60))
+    )
+
+    price_lower = df['PRICE'].quantile(0.01)
+    price_upper = df['PRICE'].quantile(0.99)
+    sqft_lower = max(200, df['SQUARE FEET'].quantile(0.01))
+    sqft_upper = df['SQUARE FEET'].quantile(0.99)
+
+    outlier_mask = (
+        (df['PRICE'] >= price_lower) &
+        (df['PRICE'] <= price_upper) &
+        (df['SQUARE FEET'] >= sqft_lower) &
+        (df['SQUARE FEET'] <= sqft_upper)
+    )
+
+    df = df[base_mask & outlier_mask]
+    removed_rows = start_rows - len(df)
+    print(
+        f"Anomaly cleanup removed {removed_rows} rows | "
+        f"Price bounds: [{price_lower:,.0f}, {price_upper:,.0f}] | "
+        f"SqFt bounds: [{sqft_lower:,.0f}, {sqft_upper:,.0f}]"
+    )
+    print(f"Rows after anomaly cleanup: {len(df)}")
+
+    return df
+
 if __name__ == "__main__":
     # Assuming you are running this from your UTD-Design-Group-13 root folder
     redfin_path = 'data/redfin_dfw.csv'
@@ -112,6 +218,10 @@ if __name__ == "__main__":
         # 3. Fetch live rates
         live_rate = fetch_current_mortgage_rate()
         engineered_df['CURRENT_MORTGAGE_RATE'] = live_rate
+        engineered_df['EXTERNAL_FEATURE_MODE'] = DEFAULT_EXTERNAL_FEATURE_MODE
+
+        # 4. Clean anomalies so downstream models get stable vectors
+        engineered_df = sanitize_feature_vectors(engineered_df)
         
         engineered_df.to_csv(output_path, index=False)
         print(f"\nSuccess! Dynamic dataset saved to {output_path}")

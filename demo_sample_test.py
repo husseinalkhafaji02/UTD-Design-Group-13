@@ -7,22 +7,6 @@ analyzer = RealEstateAnalyzer()
 # Grab the latest macro sequence for the LSTM
 recent_macro_data = np.load('data/lstm_X.npy')[-1:] 
 
-# --- SAMPLE DATA 1: The Starter Home ---
-house_1 = {
-    'SQUARE FEET': 1200, 'LOT SIZE': 4000, 'BEDS': 3, 'BATHS': 2, 
-    'PROPERTY_AGE': 45, 'HOA/MONTH': 0, 'LATITUDE': 32.7, 'LONGITUDE': -96.8, 
-    'SEARCH_MONTH_SIN': 0.5, 'SEARCH_MONTH_COS': 0.866, # Spring search
-    'DISTANCE_TO_POI': 25.0, 'LOCAL_CRIME_INDEX': 65 # Far away, higher crime
-}
-
-# --- SAMPLE DATA 2: The Luxury Estate ---
-house_2 = {
-    'SQUARE FEET': 4500, 'LOT SIZE': 12000, 'BEDS': 5, 'BATHS': 4.5, 
-    'PROPERTY_AGE': 2, 'HOA/MONTH': 250, 'LATITUDE': 33.1, 'LONGITUDE': -96.8, 
-    'SEARCH_MONTH_SIN': -1.0, 'SEARCH_MONTH_COS': 0.0, # Peak Summer search
-    'DISTANCE_TO_POI': 3.0, 'LOCAL_CRIME_INDEX': 15 # Very close, low crime
-}
-
 def _parse_money(money_str):
     return float(money_str.replace('$', '').replace(',', '').strip())
 
@@ -31,47 +15,60 @@ def _parse_percent(percent_str):
     return float(percent_str.replace('%', '').strip())
 
 
-def run_scenario_grid(analyzer_obj, macro_sequence, homes, horizons, interest_rates):
+def run_richardson_user_demo(analyzer_obj, macro_sequence, users, horizons):
     results = []
 
-    print("\n==============================================================")
-    print("SCENARIO GRID TEST: HOME x FORECAST HORIZON x INTEREST RATE")
-    print("==============================================================")
+    print("\n====================================================================")
+    print("RICHARDSON USER DEMO: USER INPUTS + MODEL OUTPUTS (3M/6M/12M)")
+    print("====================================================================")
 
-    for home_name, home_features in homes.items():
+    for user in users:
+        home_features = user['home_features']
+        rate = user['interest_rate']
+
+        print(f"\nUser: {user['user_id']} ({user['name']})")
+        print("Input (user-provided):")
+        print(
+            f"  Area: Richardson | SqFt: {home_features['SQUARE FEET']} | "
+            f"Lot: {home_features['LOT SIZE']} | Beds: {home_features['BEDS']} | "
+            f"Baths: {home_features['BATHS']} | Age: {home_features['PROPERTY_AGE']} | "
+            f"HOA: {home_features['HOA/MONTH']} | Search Rate: {rate:.2f}%"
+        )
+
         for months in horizons:
-            for rate in interest_rates:
-                output = analyzer_obj.generate_final_valuation(
-                    home_features,
-                    macro_sequence,
-                    months_in_future=months,
-                    interest_rate=rate
-                )
+            output = analyzer_obj.generate_final_valuation(
+                home_features,
+                macro_sequence,
+                months_in_future=months,
+                interest_rate=rate
+            )
 
-                baseline = _parse_money(output["Baseline Value (Today)"])
-                shift_pct = _parse_percent(output[f"Forecasted Market Shift ({months} Months)"])
-                final_value = _parse_money(output["Final Future Valuation"])
+            baseline = _parse_money(output["Baseline Value (Today)"])
+            shift_pct = _parse_percent(output[f"Forecasted Market Shift ({months} Months)"])
+            final_value = _parse_money(output["Final Future Valuation"])
 
-                results.append({
-                    "Home": home_name,
-                    "Months": months,
-                    "Rate": rate,
-                    "Baseline": baseline,
-                    "ShiftPct": shift_pct,
-                    "Final": final_value
-                })
+            results.append({
+                "UserID": user['user_id'],
+                "Name": user['name'],
+                "Months": months,
+                "Rate": rate,
+                "Baseline": baseline,
+                "ShiftPct": shift_pct,
+                "Final": final_value
+            })
 
     return results
 
 
-def print_results_table(results):
-    print("\nScenario Results:")
-    print(f"{'Home':<14} {'Months':<7} {'Rate(%)':<8} {'Baseline($)':<14} {'Shift(%)':<9} {'Final($)':<14}")
-    print("-" * 74)
+def print_user_results_table(results):
+    print("\nOutput (predicted baseline price + 3/6/12 month shifts):")
+    print(f"{'User':<6} {'Name':<14} {'Months':<7} {'Rate(%)':<8} {'Baseline($)':<14} {'Shift(%)':<9} {'Final($)':<14}")
+    print("-" * 96)
 
     for row in results:
         print(
-            f"{row['Home']:<14} "
+            f"{row['UserID']:<6} "
+            f"{row['Name']:<14} "
             f"{row['Months']:<7} "
             f"{row['Rate']:<8.2f} "
             f"{row['Baseline']:<14,.2f} "
@@ -83,47 +80,109 @@ def print_results_table(results):
 def run_sanity_checks(results):
     print("\nSanity Checks:")
 
-    # 1) Baseline should remain stable per home across macro scenarios.
-    for home in sorted(set(r["Home"] for r in results)):
-        home_rows = [r for r in results if r["Home"] == home]
-        baseline_values = [r["Baseline"] for r in home_rows]
+    # 1) Baseline should remain stable per user across horizons at fixed search rate.
+    for user_id in sorted(set(r["UserID"] for r in results)):
+        user_rows = [r for r in results if r["UserID"] == user_id]
+        baseline_values = [r["Baseline"] for r in user_rows]
         baseline_span = max(baseline_values) - min(baseline_values)
         if baseline_span < 1e-6:
-            print(f"[PASS] {home} baseline is stable across macro scenarios.")
+            print(f"[PASS] {user_id} baseline is stable across horizons.")
         else:
-            print(f"[WARN] {home} baseline changed across scenarios (span=${baseline_span:,.2f}).")
+            print(f"[WARN] {user_id} baseline changed across scenarios (span=${baseline_span:,.2f}).")
 
-    # 2) For each home and horizon, higher rates should not produce higher shift than low rates.
-    for home in sorted(set(r["Home"] for r in results)):
-        for months in sorted(set(r["Months"] for r in results)):
-            subset = [r for r in results if r["Home"] == home and r["Months"] == months]
-            subset = sorted(subset, key=lambda x: x["Rate"])
-            shifts = [r["ShiftPct"] for r in subset]
-
-            monotonic_non_increasing = all(shifts[i] >= shifts[i + 1] for i in range(len(shifts) - 1))
-            if monotonic_non_increasing:
-                print(f"[PASS] {home}, {months}m: shift decreases as rates rise.")
-            else:
-                print(f"[WARN] {home}, {months}m: shift is not monotonic vs rates.")
+    # 2) For each user, longer horizons should usually have larger magnitude shifts.
+    for user_id in sorted(set(r["UserID"] for r in results)):
+        subset = sorted([r for r in results if r["UserID"] == user_id], key=lambda x: x["Months"])
+        shifts = [r["ShiftPct"] for r in subset]
+        monotonic_non_decreasing = all(shifts[i] <= shifts[i + 1] for i in range(len(shifts) - 1))
+        if monotonic_non_decreasing:
+            print(f"[PASS] {user_id}: shift grows across 3m/6m/12m horizons.")
+        else:
+            print(f"[WARN] {user_id}: shift is not monotonic across horizons.")
 
 
-homes_to_test = {
-    "StarterHome": house_1,
-    "LuxuryEstate": house_2
-}
+users_to_test = [
+    {
+        'user_id': 'U1',
+        'name': 'Richardson Starter',
+        'interest_rate': 6.10,
+        'home_features': {
+            'SQUARE FEET': 1400, 'LOT SIZE': 6200, 'BEDS': 3, 'BATHS': 2,
+            'PROPERTY_AGE': 40, 'HOA/MONTH': 0, 'LATITUDE': 32.9600, 'LONGITUDE': -96.7200,
+            'SEARCH_MONTH_SIN': 0.5, 'SEARCH_MONTH_COS': 0.866,
+            'DISTANCE_TO_POI_SINGLE': 5.8, 'DISTANCE_TO_POI_MULTI_MIN': 2.0,
+            'DISTANCE_TO_POI_MULTI_WEIGHTED': 0.36, 'DISTANCE_TO_POI_MULTI_MEAN_TOP_N': 3.2,
+            'POI_COUNT_WITHIN_1_MI': 1, 'POI_COUNT_WITHIN_3_MI': 3,
+            'LOCAL_CRIME_INDEX_SIM': 42
+        }
+    },
+    {
+        'user_id': 'U2',
+        'name': 'Family Upgrade',
+        'interest_rate': 6.45,
+        'home_features': {
+            'SQUARE FEET': 2100, 'LOT SIZE': 7800, 'BEDS': 4, 'BATHS': 2.5,
+            'PROPERTY_AGE': 25, 'HOA/MONTH': 35, 'LATITUDE': 32.9750, 'LONGITUDE': -96.7100,
+            'SEARCH_MONTH_SIN': -0.5, 'SEARCH_MONTH_COS': 0.866,
+            'DISTANCE_TO_POI_SINGLE': 4.3, 'DISTANCE_TO_POI_MULTI_MIN': 1.7,
+            'DISTANCE_TO_POI_MULTI_WEIGHTED': 0.48, 'DISTANCE_TO_POI_MULTI_MEAN_TOP_N': 2.7,
+            'POI_COUNT_WITHIN_1_MI': 1, 'POI_COUNT_WITHIN_3_MI': 4,
+            'LOCAL_CRIME_INDEX_SIM': 35
+        }
+    },
+    {
+        'user_id': 'U3',
+        'name': 'Townhome Buyer',
+        'interest_rate': 5.90,
+        'home_features': {
+            'SQUARE FEET': 1650, 'LOT SIZE': 2900, 'BEDS': 3, 'BATHS': 2.5,
+            'PROPERTY_AGE': 12, 'HOA/MONTH': 180, 'LATITUDE': 32.9900, 'LONGITUDE': -96.7000,
+            'SEARCH_MONTH_SIN': 0.0, 'SEARCH_MONTH_COS': 1.0,
+            'DISTANCE_TO_POI_SINGLE': 3.6, 'DISTANCE_TO_POI_MULTI_MIN': 1.1,
+            'DISTANCE_TO_POI_MULTI_WEIGHTED': 0.62, 'DISTANCE_TO_POI_MULTI_MEAN_TOP_N': 2.1,
+            'POI_COUNT_WITHIN_1_MI': 2, 'POI_COUNT_WITHIN_3_MI': 5,
+            'LOCAL_CRIME_INDEX_SIM': 28
+        }
+    },
+    {
+        'user_id': 'U4',
+        'name': 'Move-Up Buyer',
+        'interest_rate': 6.70,
+        'home_features': {
+            'SQUARE FEET': 2800, 'LOT SIZE': 9100, 'BEDS': 4, 'BATHS': 3,
+            'PROPERTY_AGE': 18, 'HOA/MONTH': 65, 'LATITUDE': 32.9450, 'LONGITUDE': -96.7300,
+            'SEARCH_MONTH_SIN': -0.866, 'SEARCH_MONTH_COS': -0.5,
+            'DISTANCE_TO_POI_SINGLE': 6.5, 'DISTANCE_TO_POI_MULTI_MIN': 2.4,
+            'DISTANCE_TO_POI_MULTI_WEIGHTED': 0.31, 'DISTANCE_TO_POI_MULTI_MEAN_TOP_N': 3.8,
+            'POI_COUNT_WITHIN_1_MI': 0, 'POI_COUNT_WITHIN_3_MI': 2,
+            'LOCAL_CRIME_INDEX_SIM': 39
+        }
+    },
+    {
+        'user_id': 'U5',
+        'name': 'Luxury Relocator',
+        'interest_rate': 6.25,
+        'home_features': {
+            'SQUARE FEET': 3600, 'LOT SIZE': 11500, 'BEDS': 5, 'BATHS': 4,
+            'PROPERTY_AGE': 8, 'HOA/MONTH': 140, 'LATITUDE': 32.9700, 'LONGITUDE': -96.6900,
+            'SEARCH_MONTH_SIN': 0.866, 'SEARCH_MONTH_COS': -0.5,
+            'DISTANCE_TO_POI_SINGLE': 2.8, 'DISTANCE_TO_POI_MULTI_MIN': 0.9,
+            'DISTANCE_TO_POI_MULTI_WEIGHTED': 0.77, 'DISTANCE_TO_POI_MULTI_MEAN_TOP_N': 1.8,
+            'POI_COUNT_WITHIN_1_MI': 2, 'POI_COUNT_WITHIN_3_MI': 5,
+            'LOCAL_CRIME_INDEX_SIM': 22
+        }
+    },
+]
 
 forecast_horizons = [3, 6, 12]
-interest_rate_scenarios = [4.5, 6.0, 7.5]
-
-grid_results = run_scenario_grid(
+user_results = run_richardson_user_demo(
     analyzer,
     recent_macro_data,
-    homes_to_test,
-    forecast_horizons,
-    interest_rate_scenarios
+    users_to_test,
+    forecast_horizons
 )
 
-print_results_table(grid_results)
-run_sanity_checks(grid_results)
+print_user_results_table(user_results)
+run_sanity_checks(user_results)
 
-print("\nDone. Use this grid output as a quick architecture smoke test.")
+print("\nDone. This output shows expected user inputs and resulting valuations/shifts for Richardson scenarios.")
