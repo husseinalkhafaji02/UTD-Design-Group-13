@@ -22,12 +22,12 @@ kaggle.json
 *.env
 secrets.json
 
-# Large Data Files
-*.csv
+# Large Data File
 *.zip
 *.tar.gz
 *.dat
-data/
+.csv
+
 
 # Machine Learning Model Weights
 *.h5

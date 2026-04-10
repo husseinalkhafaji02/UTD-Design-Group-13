@@ -1,18 +1,79 @@
 import numpy as np
 import pandas as pd
+import json
+import os
 from xgboost import XGBRegressor
 from tensorflow.keras.models import load_model
+
+
+LEGACY_FEATURES = [
+    'SQUARE FEET', 'LOT SIZE', 'BEDS', 'BATHS',
+    'PROPERTY_AGE', 'HOA/MONTH',
+    'LATITUDE', 'LONGITUDE',
+    'SEARCH_MONTH_SIN', 'SEARCH_MONTH_COS',
+    'DISTANCE_TO_POI', 'LOCAL_CRIME_INDEX'
+]
+
+
+DEFAULT_FEATURE_VALUES = {
+    'DISTANCE_TO_POI_SINGLE': 10.0,
+    'DISTANCE_TO_POI_MULTI_MIN': 10.0,
+    'DISTANCE_TO_POI_MULTI_WEIGHTED': 0.1,
+    'DISTANCE_TO_POI_MULTI_MEAN_TOP_N': 10.0,
+    'POI_COUNT_WITHIN_1_MI': 0,
+    'POI_COUNT_WITHIN_3_MI': 0,
+    'LOCAL_CRIME_INDEX_SIM': 40,
+    'LOCAL_CRIME_INDEX_REAL': np.nan,
+    'LOCAL_CRIME_INDEX_REAL_IMPUTED': 40,
+    'LOCAL_CRIME_INDEX_REAL_MISSING': 1,
+}
 
 class RealEstateAnalyzer:
     def __init__(self):
         print("Loading Hybrid Architecture Models...")
+        self.feature_names = LEGACY_FEATURES
+
+        metadata_path = 'models/xgboost_micro_metadata.json'
+        model_path = 'models/xgboost_micro.json'
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'r', encoding='utf-8') as handle:
+                metadata = json.load(handle)
+            feature_set_id = metadata.get('feature_set_id')
+            if feature_set_id:
+                candidate_model = f"models/xgboost_micro_{feature_set_id}.json"
+                if os.path.exists(candidate_model):
+                    model_path = candidate_model
+            self.feature_names = metadata.get('features', LEGACY_FEATURES)
+
         self.xgb_model = XGBRegressor()
-        self.xgb_model.load_model('models/xgboost_micro.json')
+        self.xgb_model.load_model(model_path)
         self.lstm_model = load_model('models/lstm_macro.keras')
+
+    def _prepare_feature_vector(self, house_features):
+        row = house_features.copy()
+
+        # Backward compatibility from old demo dictionaries.
+        if 'DISTANCE_TO_POI_SINGLE' in self.feature_names and 'DISTANCE_TO_POI_SINGLE' not in row:
+            poi_distance = row.get('DISTANCE_TO_POI', DEFAULT_FEATURE_VALUES['DISTANCE_TO_POI_SINGLE'])
+            row['DISTANCE_TO_POI_SINGLE'] = poi_distance
+            row.setdefault('DISTANCE_TO_POI_MULTI_MIN', poi_distance)
+            row.setdefault('DISTANCE_TO_POI_MULTI_MEAN_TOP_N', poi_distance)
+            row.setdefault('DISTANCE_TO_POI_MULTI_WEIGHTED', 1.0 / (float(poi_distance) + 0.1))
+            row.setdefault('POI_COUNT_WITHIN_1_MI', 1 if float(poi_distance) <= 1.0 else 0)
+            row.setdefault('POI_COUNT_WITHIN_3_MI', 1 if float(poi_distance) <= 3.0 else 0)
+
+        if 'LOCAL_CRIME_INDEX_SIM' in self.feature_names and 'LOCAL_CRIME_INDEX_SIM' not in row:
+            row['LOCAL_CRIME_INDEX_SIM'] = row.get('LOCAL_CRIME_INDEX', DEFAULT_FEATURE_VALUES['LOCAL_CRIME_INDEX_SIM'])
+
+        for feature_name in self.feature_names:
+            if feature_name not in row:
+                row[feature_name] = DEFAULT_FEATURE_VALUES.get(feature_name, 0)
+
+        return pd.DataFrame([[row[feature_name] for feature_name in self.feature_names]], columns=self.feature_names)
         
     def predict_baseline_value(self, house_features):
         """Runs the XGBoost Micro-Model"""
-        feature_vector = pd.DataFrame([house_features])
+        feature_vector = self._prepare_feature_vector(house_features)
         log_prediction = self.xgb_model.predict(feature_vector)[0]
         return np.expm1(log_prediction)
 
@@ -46,6 +107,13 @@ class RealEstateAnalyzer:
         # Calculate realistic growth
         raw_scaled_difference = future_index_scaled - current_index_scaled
         growth_rate = raw_scaled_difference * 0.05 
+
+        # Economic monotonicity guardrail:
+        # higher mortgage rates should reduce forward growth, especially at short/medium horizons.
+        neutral_rate = 6.0
+        horizon_factor = max(months_in_future, 1) / 12.0
+        rate_sensitivity = 0.005
+        growth_rate -= (live_interest_rate - neutral_rate) * rate_sensitivity * horizon_factor
         
         # Safety guardrail (+/- 10%)
         return max(min(growth_rate, 0.10), -0.10)
