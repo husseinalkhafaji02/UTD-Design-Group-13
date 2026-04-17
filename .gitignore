@@ -26,7 +26,9 @@ secrets.json
 *.zip
 *.tar.gz
 *.dat
-.csv
+*.csv
+data/
+tuner_logs/
 
 
 # Machine Learning Model Weights
