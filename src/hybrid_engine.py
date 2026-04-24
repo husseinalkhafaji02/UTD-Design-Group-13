@@ -144,3 +144,4 @@ if __name__ == "__main__":
     }
     
     recent_macro_data = np.load('data/lstm_X.npy')[-1:]
+    
