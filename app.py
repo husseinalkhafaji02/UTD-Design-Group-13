@@ -2,11 +2,15 @@ from flask import Flask, request, render_template_string
 import numpy as np
 from math import sin, cos, pi
 from datetime import datetime
+from functools import lru_cache
+from geopy.geocoders import Nominatim
+from geopy.exc import GeopyError
 
 from src.hybrid_engine import RealEstateAnalyzer
 from src.data_preprocessing import haversine_distance, fetch_local_crime_index
 
 app = Flask(__name__)
+geocoder = Nominatim(user_agent='realestate_market_analyzer')
 
 # loading models
 analyzer = RealEstateAnalyzer()
@@ -125,12 +129,8 @@ INPUT_TEMPLATE = """
                     <input type="number" step="any" name="hoa_month" id="hoa_month" required value="{{ values.hoa_month if values else '0' }}">
                 </div>
                 <div class="field">
-                    <label for="latitude">Latitude</label>
-                    <input type="number" step="any" name="latitude" id="latitude" required value="{{ values.latitude if values else '' }}">
-                </div>
-                <div class="field">
-                    <label for="longitude">Longitude</label>
-                    <input type="number" step="any" name="longitude" id="longitude" required value="{{ values.longitude if values else '' }}">
+                    <label for="address">Property Address</label>
+                    <input type="text" name="address" id="address" required placeholder="123 Main St, Dallas, TX" value="{{ values.address if values else '' }}">
                 </div>
                 <div class="field">
                     <label for="search_month">Search Month</label>
@@ -148,7 +148,7 @@ INPUT_TEMPLATE = """
         </form>
 
         <div class="hint">
-            The app computes property age, distance to the project point-of-interest, crime index, and seasonal month features automatically.
+            The app computes coordinates from your address, then derives property age, distance to the project point-of-interest, crime index, and seasonal month features automatically.
         </div>
     </div>
 </body>
@@ -294,6 +294,19 @@ def _parse_percent(percent_str: str) -> float:
     return float(percent_str.replace('%', '').strip())
 
 
+@lru_cache(maxsize=256)
+def geocode_address(address: str):
+    try:
+        location = geocoder.geocode(address, timeout=10)
+    except GeopyError as exc:
+        raise ValueError(f'Address lookup failed: {exc}') from exc
+
+    if not location:
+        raise ValueError('Could not find that address. Try a more complete street/city/state format.')
+
+    return float(location.latitude), float(location.longitude)
+
+
 
 def build_house_features(form_data):
     current_year = datetime.now().year
@@ -304,8 +317,11 @@ def build_house_features(form_data):
     baths = float(form_data['baths'])
     year_built = int(form_data['year_built'])
     hoa_month = float(form_data['hoa_month'])
-    latitude = float(form_data['latitude'])
-    longitude = float(form_data['longitude'])
+    address = str(form_data['address']).strip()
+    if not address:
+        raise ValueError('Address is required.')
+
+    latitude, longitude = geocode_address(address)
     search_month = int(form_data['search_month'])
 
     property_age = current_year - year_built
@@ -337,6 +353,7 @@ def build_house_features(form_data):
         ('Year Built', year_built),
         ('Property Age', property_age),
         ('HOA / Month', hoa_month),
+        ('Address', address),
         ('Latitude', latitude),
         ('Longitude', longitude),
         ('Search Month', search_month),

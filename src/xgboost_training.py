@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 import pandas as pd
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from xgboost import XGBRegressor
@@ -199,7 +200,41 @@ def train_and_evaluate(df: pd.DataFrame, feature_set_name: str, feature_list, tu
         'r2': r2,
         'params': chosen_params,
         'model': model,
+        'X_test': X_test,
+        'y_test_log': y_test,
     }
+
+
+def build_feature_impact_table(primary_result: dict) -> pd.DataFrame:
+    model = primary_result['model']
+    features = primary_result['features']
+    X_test = primary_result['X_test']
+    y_test_log = primary_result['y_test_log']
+
+    perm_result = permutation_importance(
+        model,
+        X_test,
+        y_test_log,
+        scoring='neg_mean_absolute_error',
+        n_repeats=10,
+        random_state=42,
+        n_jobs=-1,
+    )
+
+    impact_df = pd.DataFrame(
+        {
+            'Feature': features,
+            'Model_Impact_Gain': model.feature_importances_,
+            'Eval_Impact_MAE_Delta_Log': perm_result.importances_mean,
+            'Eval_Impact_MAE_Delta_Log_Std': perm_result.importances_std,
+        }
+    )
+    impact_df = impact_df.sort_values(
+        by=['Eval_Impact_MAE_Delta_Log', 'Model_Impact_Gain'],
+        ascending=False,
+    ).reset_index(drop=True)
+    impact_df['Rank'] = np.arange(1, len(impact_df) + 1)
+    return impact_df
 
 
 print("Loading Engineered Feature Vectors...")
@@ -260,15 +295,14 @@ if RUN_ABLATION_GATE:
             f"${result['mae']:,.2f} | {result['r2']:.4f}"
         )
 
-feature_importance_df = pd.DataFrame(
-    {
-        'Feature': primary_result['features'],
-        'Importance': primary_result['model'].feature_importances_,
-    }
-).sort_values(by='Importance', ascending=False)
+feature_impact_df = build_feature_impact_table(primary_result)
 
-print("\nFeature Importances (Primary Model):")
-print(feature_importance_df.to_string(index=False))
+print("\nFeature Impact Table (Primary Model):")
+print(feature_impact_df.to_string(index=False))
+
+feature_impact_path = 'models/xgboost_primary_feature_impact.csv'
+feature_impact_df.to_csv(feature_impact_path, index=False)
+print(f"Saved feature impact table: {feature_impact_path}")
 
 artifact_name = f"models/xgboost_micro_{primary_result['feature_set_id']}.json"
 primary_result['model'].save_model(artifact_name)
@@ -288,6 +322,7 @@ metadata = {
     'crime_low_coverage_strategy': CRIME_LOW_COVERAGE_STRATEGY,
     'crime_coverage_threshold': CRIME_COVERAGE_THRESHOLD,
     'early_stopping_rounds': EARLY_STOPPING_ROUNDS,
+    'feature_impact_table_path': feature_impact_path,
 }
 
 metadata_path = 'models/xgboost_micro_metadata.json'

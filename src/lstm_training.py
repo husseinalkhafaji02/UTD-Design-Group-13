@@ -1,15 +1,38 @@
 import numpy as np
 import os
+import argparse
 import matplotlib.pyplot as plt
+import pandas as pd
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers import Adam, RMSprop, Nadam
 from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.metrics import mean_absolute_error
+import keras_tuner as kt
 
 print("==========================================")
 print("PHASE 4: LSTM MACRO-FORECASTING TRAINING")
 print("==========================================\n")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Train the macro LSTM model with optional tuner resume behavior.'
+    )
+    parser.add_argument(
+        '--resume-tuner',
+        action='store_true',
+        help='Resume an existing Keras Tuner search from tuner_logs/project_name if available.'
+    )
+    parser.add_argument(
+        '--tuner-project-name',
+        default='lstm_macro_tuning',
+        help='Keras Tuner project folder name under tuner_logs/.'
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
 
 # 1. Load the 3D Tensors
 try:
@@ -33,93 +56,147 @@ print(f"Training on {len(X_train)} historical sequences.")
 print(f"Validating on {len(X_val)} holdout sequences.")
 print(f"Testing on {len(X_test)} future sequences.\n")
 
+KNOWN_FEATURE_NAMES = [
+    'ZHVI_AllHomes_CLEAN',
+    'HISTORICAL_MORTGAGE_RATE',
+    'MACRO_SENTIMENT_SCORE',
+]
 
-def build_lstm_model(units, dropout_rate, learning_rate):
-    model = Sequential([
-        # The LSTM layer reads the 12-month sequence and looks for patterns
-        LSTM(units, activation='tanh', input_shape=(X.shape[1], X.shape[2])),
-        # Dropout prevents the neural network from memorizing the data (Overfitting)
-        Dropout(dropout_rate),
-        # The Dense layer outputs the single prediction for the 13th month
-        Dense(1)
-    ])
-    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse')
+
+def infer_feature_names(num_features):
+    if num_features <= len(KNOWN_FEATURE_NAMES):
+        return KNOWN_FEATURE_NAMES[:num_features]
+    dynamic_names = [f'FEATURE_{idx}' for idx in range(num_features)]
+    for idx, name in enumerate(KNOWN_FEATURE_NAMES):
+        if idx < len(dynamic_names):
+            dynamic_names[idx] = name
+    return dynamic_names
+
+
+def build_lstm_feature_impact_table(model, X_eval, y_eval, feature_names, repeats=8):
+    y_base = model.predict(X_eval, verbose=0)
+    baseline_mae = mean_absolute_error(y_eval, y_base)
+    rng = np.random.default_rng(42)
+    impact_rows = []
+
+    for feature_idx, feature_name in enumerate(feature_names):
+        deltas = []
+        for _ in range(repeats):
+            X_perm = X_eval.copy()
+            sample_order = rng.permutation(X_perm.shape[0])
+            X_perm[:, :, feature_idx] = X_perm[sample_order, :, feature_idx]
+            y_perm = model.predict(X_perm, verbose=0)
+            perm_mae = mean_absolute_error(y_eval, y_perm)
+            deltas.append(perm_mae - baseline_mae)
+
+        impact_rows.append(
+            {
+                'Feature': feature_name,
+                'Impact_to_Model_MAE_Delta': float(np.mean(deltas)),
+                'Impact_to_Model_MAE_Delta_Std': float(np.std(deltas)),
+            }
+        )
+
+    impact_df = pd.DataFrame(impact_rows).sort_values(
+        by='Impact_to_Model_MAE_Delta',
+        ascending=False,
+    ).reset_index(drop=True)
+    impact_df['Rank'] = np.arange(1, len(impact_df) + 1)
+    return impact_df, baseline_mae
+
+
+def build_tuner_model(hp):
+    model = Sequential()
+    
+    # Advantage: Increasing layers allows the network to learn more complex hierarchical temporal patterns 
+    # (e.g., short-term seasonality combined with long-term macro trends).
+    # However, too many layers on small datasets can cause overfitting and vanishing gradients.
+    num_layers = hp.Int('num_layers', min_value=1, max_value=3, step=1)
+    
+    for i in range(num_layers):
+        units = hp.Int(f'units_{i}', min_value=32, max_value=128, step=32)
+        dropout = hp.Float(f'dropout_{i}', min_value=0.1, max_value=0.4, step=0.1)
+        
+        # Intermediate LSTM layers must return sequences for the next LSTM layer
+        return_seq = (i < num_layers - 1)
+        
+        if i == 0:
+            model.add(LSTM(units, activation='tanh', return_sequences=return_seq, input_shape=(X.shape[1], X.shape[2])))
+        else:
+            model.add(LSTM(units, activation='tanh', return_sequences=return_seq))
+            
+        model.add(Dropout(dropout))
+        
+    model.add(Dense(1))
+
+    # Advantage: Changing optimizers can help escape local minima and speed up convergence.
+    # - Adam is a strong default.
+    # - RMSprop sometimes handles recurrent neural networks better by normalizing gradients based on history.
+    # - Nadam adds Nesterov momentum which helps 'look ahead' during gradient descent.
+    optimizer_choice = hp.Choice('optimizer', values=['adam', 'rmsprop', 'nadam'])
+    learning_rate = hp.Float('learning_rate', min_value=1e-4, max_value=1e-2, sampling='log')
+
+    if optimizer_choice == 'adam':
+        optimizer = Adam(learning_rate=learning_rate)
+    elif optimizer_choice == 'rmsprop':
+        optimizer = RMSprop(learning_rate=learning_rate)
+    else:
+        optimizer = Nadam(learning_rate=learning_rate)
+
+    model.compile(optimizer=optimizer, loss='mse')
     return model
 
 
-# 3. Hyperparameter Tuning with Early Stopping
-print("Beginning LSTM hyperparameter tuning...")
+# 3. Hyperparameter Tuning with Keras Tuner and Early Stopping
+print("Beginning LSTM hyperparameter tuning with Keras Tuner...")
 
-search_space = [
-    {'units': 32, 'dropout': 0.1, 'learning_rate': 0.001, 'batch_size': 16},
-    {'units': 32, 'dropout': 0.2, 'learning_rate': 0.001, 'batch_size': 32},
-    {'units': 50, 'dropout': 0.1, 'learning_rate': 0.001, 'batch_size': 16},
-    {'units': 50, 'dropout': 0.2, 'learning_rate': 0.001, 'batch_size': 32},
-    {'units': 64, 'dropout': 0.2, 'learning_rate': 0.0005, 'batch_size': 16},
-    {'units': 64, 'dropout': 0.3, 'learning_rate': 0.0005, 'batch_size': 32},
-]
+tuner = kt.Hyperband(
+    build_tuner_model,
+    objective='val_loss',
+    max_epochs=50,
+    factor=3,
+    directory='tuner_logs',
+    project_name=args.tuner_project_name,
+    overwrite=not args.resume_tuner,
+)
 
-best_trial = None
-best_history = None
+mode_label = 'RESUME' if args.resume_tuner else 'FRESH'
+print(
+    f"Keras Tuner mode: {mode_label} "
+    f"(project=tuner_logs/{args.tuner_project_name})"
+)
 
-for trial_idx, params in enumerate(search_space, start=1):
-    print(
-        f"\nTrial {trial_idx}/{len(search_space)} | "
-        f"units={params['units']}, dropout={params['dropout']}, "
-        f"lr={params['learning_rate']}, batch={params['batch_size']}"
-    )
+early_stopping = EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    restore_best_weights=True,
+    mode='min'
+)
 
-    trial_model = build_lstm_model(
-        units=params['units'],
-        dropout_rate=params['dropout'],
-        learning_rate=params['learning_rate']
-    )
-
-    early_stopping = EarlyStopping(
-        monitor='val_loss',
-        patience=5,
-        restore_best_weights=True,
-        mode='min'
-    )
-
-    trial_history = trial_model.fit(
-        X_train,
-        y_train,
-        epochs=200,
-        batch_size=params['batch_size'],
-        validation_data=(X_val, y_val),
-        callbacks=[early_stopping],
-        verbose=0
-    )
-
-    best_val_loss = float(np.min(trial_history.history['val_loss']))
-    stopped_epoch = len(trial_history.history['loss'])
-
-    print(f"Trial best val_loss: {best_val_loss:.6f} | epochs run: {stopped_epoch}")
-
-    if best_trial is None or best_val_loss < best_trial['best_val_loss']:
-        best_trial = {
-            'params': params,
-            'best_val_loss': best_val_loss,
-            'epochs_run': stopped_epoch,
-            'model': trial_model,
-        }
-        best_history = trial_history
+# Start the search
+tuner.search(
+    X_train, 
+    y_train, 
+    epochs=50, 
+    validation_data=(X_val, y_val), 
+    callbacks=[early_stopping],
+    verbose=1
+)
 
 print("\nBest LSTM configuration selected:")
-print(
-    f"units={best_trial['params']['units']}, "
-    f"dropout={best_trial['params']['dropout']}, "
-    f"learning_rate={best_trial['params']['learning_rate']}, "
-    f"batch_size={best_trial['params']['batch_size']}"
-)
-print(
-    f"Best validation loss: {best_trial['best_val_loss']:.6f} "
-    f"(epochs run before early stopping: {best_trial['epochs_run']})"
-)
+best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+print(f"Optimal layers: {best_hps.get('num_layers')}")
+print(f"Optimal optimizer: {best_hps.get('optimizer')} @ LR: {best_hps.get('learning_rate'):.5f}")
 
-model = best_trial['model']
-history = best_history
+# Rebuild the best model and train it optimally
+model = tuner.hypermodel.build(best_hps)
+history = model.fit(
+    X_train, y_train, 
+    epochs=200, 
+    validation_data=(X_val, y_val), 
+    callbacks=[early_stopping], 
+    verbose=1
+)
 
 # 5. Evaluate Accuracy
 print("\nGenerating Future Predictions...")
@@ -132,6 +209,24 @@ print(f"\n======================================")
 print(f"LSTM Scaled Mean Absolute Error: {mae:.4f}")
 print(f"======================================")
 print("(Note: A score closer to 0.0 means the predicted trend matches the actual trend perfectly.)\n")
+
+feature_names = infer_feature_names(X_test.shape[2])
+feature_impact_df, baseline_perm_mae = build_lstm_feature_impact_table(
+    model=model,
+    X_eval=X_test,
+    y_eval=y_test,
+    feature_names=feature_names,
+    repeats=8,
+)
+
+print("LSTM Feature Impact Table (Permutation on Evaluation Split):")
+print(feature_impact_df.to_string(index=False))
+print(f"Baseline eval MAE used for permutation impact: {baseline_perm_mae:.6f}\n")
+
+os.makedirs('models', exist_ok=True)
+lstm_feature_impact_path = 'models/lstm_feature_impact.csv'
+feature_impact_df.to_csv(lstm_feature_impact_path, index=False)
+print(f"Saved LSTM feature impact table: {lstm_feature_impact_path}")
 
 # 6. Visualize the Results (For the Professor/Team Meeting)
 print("Generating visualization chart...")
