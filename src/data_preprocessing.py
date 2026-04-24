@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import pandas_datareader.data as web
 
 DEFAULT_EXTERNAL_FEATURE_MODE = 'simulated'
 
@@ -141,6 +140,8 @@ def simulate_seasonality_test(df):
 def fetch_current_mortgage_rate():
     print("Fetching live 30-Year Mortgage Rate from FRED...")
     try:
+        import pandas_datareader.data as web
+
         start_date = datetime(datetime.now().year, 1, 1)
         end_date = datetime.now()
         rates = web.DataReader('MORTGAGE30US', 'fred', start_date, end_date)

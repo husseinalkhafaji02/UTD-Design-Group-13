@@ -5,3 +5,7 @@ xgboost
 tensorflow
 matplotlib
 seaborn
+flask
+pandas_datareader
+keras-tuner
+geopy

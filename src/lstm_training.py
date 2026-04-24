@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import argparse
 import matplotlib.pyplot as plt
 import pandas as pd
 from tensorflow.keras.models import Sequential
@@ -12,6 +13,26 @@ import keras_tuner as kt
 print("==========================================")
 print("PHASE 4: LSTM MACRO-FORECASTING TRAINING")
 print("==========================================\n")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Train the macro LSTM model with optional tuner resume behavior.'
+    )
+    parser.add_argument(
+        '--resume-tuner',
+        action='store_true',
+        help='Resume an existing Keras Tuner search from tuner_logs/project_name if available.'
+    )
+    parser.add_argument(
+        '--tuner-project-name',
+        default='lstm_macro_tuning',
+        help='Keras Tuner project folder name under tuner_logs/.'
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
 
 # 1. Load the 3D Tensors
 try:
@@ -135,7 +156,14 @@ tuner = kt.Hyperband(
     max_epochs=50,
     factor=3,
     directory='tuner_logs',
-    project_name='lstm_macro_tuning'
+    project_name=args.tuner_project_name,
+    overwrite=not args.resume_tuner,
+)
+
+mode_label = 'RESUME' if args.resume_tuner else 'FRESH'
+print(
+    f"Keras Tuner mode: {mode_label} "
+    f"(project=tuner_logs/{args.tuner_project_name})"
 )
 
 early_stopping = EarlyStopping(
