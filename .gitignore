@@ -32,9 +32,9 @@ tuner_logs/
 
 
 # Machine Learning Model Weights
-*.h5
-*.keras
-*.pkl
-*.joblib
-*.model
-models/
+# *.h5
+# *.keras
+# *.pkl
+# *.joblib
+# *.model
+# models/ - Now tracking models for sharing

@@ -1,0 +1,43 @@
+{
+  "created_at_utc": "2026-04-17T19:06:08.873492+00:00",
+  "feature_mode": "simulated",
+  "feature_set_id": "core_plus_poi_v1",
+  "features": [
+    "SQUARE FEET",
+    "LOT SIZE",
+    "BEDS",
+    "BATHS",
+    "PROPERTY_AGE",
+    "HOA/MONTH",
+    "LATITUDE",
+    "LONGITUDE",
+    "SEARCH_MONTH_SIN",
+    "SEARCH_MONTH_COS",
+    "DISTANCE_TO_POI_SINGLE",
+    "DISTANCE_TO_POI_MULTI_MIN",
+    "DISTANCE_TO_POI_MULTI_WEIGHTED",
+    "DISTANCE_TO_POI_MULTI_MEAN_TOP_N",
+    "POI_COUNT_WITHIN_1_MI",
+    "POI_COUNT_WITHIN_3_MI"
+  ],
+  "rows_used": 7008,
+  "mae": 101771.35807261946,
+  "r2": 0.7608701893476812,
+  "tuned_params": {
+    "subsample": 0.7,
+    "reg_lambda": 2.0,
+    "reg_alpha": 0.01,
+    "n_estimators": 1000,
+    "min_child_weight": 1,
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "gamma": 0,
+    "colsample_bytree": 0.6
+  },
+  "crime_coverage": 0.0,
+  "crime_gate_decision": "Coverage=0.0% < 90% or mode=simulated; excluding real-crime feature for this run.",
+  "crime_low_coverage_strategy": "exclude",
+  "crime_coverage_threshold": 0.9,
+  "early_stopping_rounds": 5,
+  "feature_impact_table_path": "models/xgboost_primary_feature_impact.csv"
+}
