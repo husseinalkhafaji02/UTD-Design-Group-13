@@ -1,19 +1,9 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-import requests
-from functools import lru_cache
-import os
-from dotenv import load_dotenv
+from datetime import datetime
 
-# Load environment variables from .env file (if it exists)
-load_dotenv()
+DEFAULT_EXTERNAL_FEATURE_MODE = 'simulated'
 
-DEFAULT_EXTERNAL_FEATURE_MODE = os.getenv('EXTERNAL_FEATURE_MODE', 'live')  # Use real APIs when available
-OVERPASS_API_URL = os.getenv('OVERPASS_API_URL', 'https://overpass-api.de/api/interpreter')
-GDELT_API_URL = os.getenv('GDELT_API_URL', 'https://api.gdeltproject.org/api/v2/search/tv')
-
-# Fallback default POIs (used when Overpass API fails)
 DEFAULT_POIS = [
     {'name': 'DFW Transit Hub', 'lat': 32.8975, 'lon': -97.0403, 'category': 'transit'},
     {'name': 'Dallas CBD', 'lat': 32.7767, 'lon': -96.7970, 'category': 'retail'},
@@ -27,130 +17,6 @@ POI_CATEGORY_WEIGHTS = {
     'hospital': 0.20,
     'retail': 0.20
 }
-
-@lru_cache(maxsize=512)
-def fetch_pois_from_overpass(lat, lon):
-    """Fetch real POIs (schools, hospitals, transit, retail) from Overpass API.
-    
-    Returns list of POI dicts with name, lat, lon, category.
-    Falls back to DEFAULT_POIS if API fails.
-    """
-    try:
-        # Query for schools, hospitals, transit stations, and retail within ~5km
-        query = f"""
-        [bbox:{lat-0.05},{lon-0.05},{lat+0.05},{lon+0.05}];
-        (
-          node["amenity"="school"];
-          way["amenity"="school"];
-          node["amenity"="hospital"];
-          way["amenity"="hospital"];
-          node["public_transport"="station"];
-          way["public_transport"="station"];
-          node["shop"~"supermarket|shopping_centre|mall"];
-          way["shop"~"supermarket|shopping_centre|mall"];
-        );
-        out center;
-        """
-        
-        response = requests.post(OVERPASS_API_URL, data=query, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        elements = data.get('elements', [])
-        
-        pois = []
-        category_map = {
-            'school': 'school',
-            'hospital': 'hospital',
-            'public_transport': 'transit',
-            'shop': 'retail'
-        }
-        
-        for element in elements[:20]:  # Limit to top 20 to avoid too many queries
-            if 'lat' in element and 'lon' in element:
-                tags = element.get('tags', {})
-                category = 'retail'  # default
-                
-                if tags.get('amenity') == 'school':
-                    category = 'school'
-                elif tags.get('amenity') == 'hospital':
-                    category = 'hospital'
-                elif tags.get('public_transport'):
-                    category = 'transit'
-                elif tags.get('shop'):
-                    category = 'retail'
-                
-                pois.append({
-                    'name': tags.get('name', f"{category.title()} {len(pois)}"),
-                    'lat': element['lat'],
-                    'lon': element['lon'],
-                    'category': category
-                })
-        
-        if pois:
-            print(f"Found {len(pois)} real POIs from Overpass API for ({lat:.4f}, {lon:.4f})")
-            return pois
-        else:
-            print(f"No POIs found from Overpass for ({lat:.4f}, {lon:.4f}), using defaults")
-            return DEFAULT_POIS
-            
-    except Exception as e:
-        print(f"Warning: Could not fetch POIs from Overpass for ({lat:.4f}, {lon:.4f}): {e}")
-        return DEFAULT_POIS
-
-def fetch_market_sentiment():
-    """Fetch Dallas real estate market sentiment from GDELT news data.
-    
-    Returns sentiment score: -1 (negative) to +1 (positive)
-    """
-    try:
-        # Query GDELT for recent Dallas real estate news
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=7)  # Last 7 days
-        
-        params = {
-            'query': 'Dallas real estate market housing prices',
-            'mode': 'artlist',
-            'sort': 'date',
-            'format': 'json',
-            'startdatetime': start_date.strftime('%Y%m%d%H%M%S'),
-            'enddatetime': end_date.strftime('%Y%m%d%H%M%S')
-        }
-        
-        response = requests.get(GDELT_API_URL, params=params, timeout=5)
-        response.raise_for_status()
-        
-        data = response.json()
-        articles = data.get('articles', [])
-        
-        if not articles:
-            return 0.0  # Neutral if no articles found
-        
-        # Simple sentiment scoring based on keyword presence
-        positive_keywords = ['growth', 'surge', 'boom', 'opportunity', 'strong', 'rise', 'increase']
-        negative_keywords = ['decline', 'fall', 'crisis', 'risk', 'drop', 'crash', 'collapse']
-        
-        sentiment_scores = []
-        for article in articles[:10]:  # Analyze top 10 articles
-            text = (article.get('title', '') + ' ' + article.get('summary', '')).lower()
-            
-            pos_count = sum(1 for keyword in positive_keywords if keyword in text)
-            neg_count = sum(1 for keyword in negative_keywords if keyword in text)
-            
-            if pos_count + neg_count > 0:
-                score = (pos_count - neg_count) / (pos_count + neg_count)
-                sentiment_scores.append(score)
-        
-        if sentiment_scores:
-            avg_sentiment = np.mean(sentiment_scores)
-            print(f"Market sentiment (GDELT): {avg_sentiment:.2f} from {len(articles)} articles")
-            return float(np.clip(avg_sentiment, -1, 1))
-        else:
-            return 0.0
-            
-    except Exception as e:
-        print(f"Warning: Could not fetch market sentiment from GDELT: {e}")
-        return 0.0
 
 def load_and_clean_redfin(filepath):
     print("Loading raw Redfin data...")
@@ -181,68 +47,11 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     c = 2 * np.arcsin(np.sqrt(a))
     return R * c
 
-@lru_cache(maxsize=512)
-def fetch_crime_data_from_overpass(lat, lon, radius_meters=2000):
-    """Fetch police stations and crime-related POIs from Overpass API.
-    
-    Returns a crime index (0-100) based on proximity to police stations.
-    Higher index = more police presence = potentially safer area.
-    """
-    try:
-        # Query for police stations, police stations, and sheriff offices within radius
-        query = f"""
-        [bbox:{lat-0.02},{lon-0.02},{lat+0.02},{lon+0.02}];
-        (
-          node["amenity"="police"];
-          way["amenity"="police"];
-          relation["amenity"="police"];
-        );
-        out center;
-        """
-        
-        response = requests.post(OVERPASS_API_URL, data=query, timeout=5)
-        response.raise_for_status()
-        
-        data = response.json()
-        elements = data.get('elements', [])
-        
-        if not elements:
-            return 50  # Default neutral score if no police stations found
-        
-        # Calculate proximity score based on closest police stations
-        closest_distance = float('inf')
-        for element in elements:
-            if 'lat' in element and 'lon' in element:
-                dist = haversine_distance(lat, lon, element['lat'], element['lon'])
-                closest_distance = min(closest_distance, dist)
-        
-        # Convert distance to safety score: closer = higher score
-        # 0.5 miles or closer = 100 (very safe)
-        # 5+ miles = 10 (less safe)
-        if closest_distance <= 0.5:
-            return 95
-        elif closest_distance <= 1.0:
-            return 80
-        elif closest_distance <= 2.0:
-            return 70
-        elif closest_distance <= 5.0:
-            return 50
-        else:
-            return 30
-            
-    except Exception as e:
-        print(f"Warning: Could not fetch crime data from Overpass for ({lat}, {lon}): {e}")
-        # Fallback to simulated
-        np.random.seed(int(abs(lat * 1000))) 
-        return np.random.randint(10, 85)
-
 def fetch_local_crime_index(lat, lon):
-    """Wrapper that tries live API then falls back to simulated."""
-    if DEFAULT_EXTERNAL_FEATURE_MODE == 'live':
-        return fetch_crime_data_from_overpass(lat, lon)
-    else:
-        np.random.seed(int(abs(lat * 1000))) 
-        return np.random.randint(10, 85)
+    """Acts as a wrapper for a future Police API integration."""
+    # Removed the print statement here so it doesn't print 7,000 times!
+    np.random.seed(int(abs(lat * 1000))) 
+    return np.random.randint(10, 85)
 
 def engineer_xgboost_vectors(df, user_poi_lat=32.9866, user_poi_lon=-96.7503):
     print("Engineering Dynamic Feature Vectors...")
@@ -258,15 +67,8 @@ def engineer_xgboost_vectors(df, user_poi_lat=32.9866, user_poi_lon=-96.7503):
         user_poi_lat, user_poi_lon
     )
 
-    # Fetch real POIs for the first property to use for all (or fallback to defaults)
-    pois = DEFAULT_POIS
-    if len(df) > 0 and DEFAULT_EXTERNAL_FEATURE_MODE == 'live':
-        first_lat = df['LATITUDE'].iloc[0]
-        first_lon = df['LONGITUDE'].iloc[0]
-        pois = fetch_pois_from_overpass(first_lat, first_lon)
-
     distance_frames = []
-    for poi in pois:
+    for poi in DEFAULT_POIS:
         series = haversine_distance(df['LATITUDE'], df['LONGITUDE'], poi['lat'], poi['lon'])
         distance_frames.append(
             pd.DataFrame(
@@ -297,22 +99,15 @@ def engineer_xgboost_vectors(df, user_poi_lat=32.9866, user_poi_lon=-96.7503):
     # Backward-compatible alias while migrating downstream code.
     df['DISTANCE_TO_POI'] = df['DISTANCE_TO_POI_SINGLE']
     
-    if DEFAULT_EXTERNAL_FEATURE_MODE == 'live':
-        print("Fetching live crime data from Overpass API...")
-    else:
-        print("Using simulated crime data...")
-    
+    print("Pinging Simulated Local Municipal API for 90-day crime data...")
     df['LOCAL_CRIME_INDEX_SIM'] = df.apply(
         lambda row: fetch_local_crime_index(row['LATITUDE'], row['LONGITUDE']), axis=1
     )
 
-    # Add market sentiment feature
-    market_sentiment = fetch_market_sentiment()
-    df['MARKET_SENTIMENT'] = market_sentiment
-    
-    # Metadata for data freshness
-    df['LOCAL_CRIME_DATA_AGE_DAYS'] = 0 if DEFAULT_EXTERNAL_FEATURE_MODE == 'live' else np.nan
-    df['LOCAL_CRIME_SNAPSHOT_IS_STALE'] = 0 if DEFAULT_EXTERNAL_FEATURE_MODE == 'live' else 1
+    # Placeholder columns for future external integration; keep schema stable now.
+    df['LOCAL_CRIME_INDEX_REAL'] = np.nan
+    df['LOCAL_CRIME_DATA_AGE_DAYS'] = np.nan
+    df['LOCAL_CRIME_SNAPSHOT_IS_STALE'] = 1
 
     # Backward-compatible alias while migrating downstream code.
     df['LOCAL_CRIME_INDEX'] = df['LOCAL_CRIME_INDEX_SIM']

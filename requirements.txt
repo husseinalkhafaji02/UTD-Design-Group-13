@@ -9,5 +9,3 @@ flask
 pandas_datareader
 keras-tuner
 geopy
-requests
-python-dotenv
