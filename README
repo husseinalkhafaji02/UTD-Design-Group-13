@@ -24,3 +24,54 @@ We utilize a hybrid machine learning approach to capture both immediate property
 1. Clone the repository:
    ```bash
    git clone [https://github.com/husseinalkhafaji02/UTD-Design-Group-13.git](https://github.com/husseinalkhafaji02/UTD-Design-Group-13.git)
+
+## Project Structure (expanded)
+
+- `data/` - Raw and processed datasets (ignored by Git; large files excluded)
+- `notebooks/` - Exploratory Data Analysis (EDA) and experiments
+- `src/` - Core Python scripts for data processing, feature engineering, and model training
+   - `src/external_features_manager.py` - builds cached `data/zip_crime_lookup.csv` and `data/sentiment_time_series.csv`
+   - `src/external_apis/` - API adapters for RapidAPI and Finnhub
+- `models/` - Saved model weights (tracked per project decision)
+
+## Environment & API keys
+
+Copy `.env.example` to `.env` and fill in your keys (do NOT commit `.env`). The manager uses these variables:
+
+```text
+RAPIDAPI_KEY=your_rapidapi_key
+RAPIDAPI_HOST=provider_host
+RAPIDAPI_CRIME_URL=https://api.example.com/crime/{zip}
+FINNHUB_KEY=your_finnhub_key
+FINNHUB_SYMBOL=TESTSYM
+OVERPASS_API_URL=https://overpass-api.de/api/interpreter  # optional override
+GDELT_API_URL=https://api.gdeltproject.org/api/v2/search/tv  # optional override
+```
+
+## Running the external features manager
+
+After creating a `.env` file (or setting the environment variables), run:
+
+```powershell
+python src/external_features_manager.py
+```
+
+This produces:
+
+- `data/zip_crime_lookup.csv` — Crime index per ZIP (used by XGBoost)
+- `data/sentiment_time_series.csv` — Weekly sentiment time series (used by LSTM)
+
+The manager prefers RapidAPI (crime) and Finnhub (sentiment) when keys are present; otherwise it falls back to Overpass/GDELT and will write neutral defaults if APIs are unavailable.
+
+## Tests
+
+Install `pytest` in your venv and run tests:
+
+```powershell
+python -m pip install pytest
+python -m pytest -q
+```
+
+## Notes on secrets and git
+
+The repository `.gitignore` now excludes common secret files such as `.env` and `keys.json`. Never commit your API keys.

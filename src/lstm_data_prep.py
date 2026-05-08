@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import os
 import pandas_datareader.data as web
+from datetime import datetime
 
 
 def load_historical_mortgage_rates(start_date, end_date):
@@ -69,8 +70,34 @@ def prep_zillow_data(filepath, lookback_window=12):
         # Fallback trend if FRED is unavailable.
         df['HISTORICAL_MORTGAGE_RATE'] = 5.0 + np.sin(np.arange(len(df)) / 12) * 1.0
 
-    # Keep sentiment neutral until a real historical feed is integrated.
+    # Keep sentiment neutral by default; attempt to load from cached sentiment time series
     df['MACRO_SENTIMENT_SCORE'] = 0.0
+    
+    # Try to load sentiment from external_features_manager output
+    sentiment_file = 'data/sentiment_time_series.csv'
+    if os.path.exists(sentiment_file):
+        try:
+            print(f"Loading sentiment time series from {sentiment_file}...")
+            sentiment_df = pd.read_csv(sentiment_file)
+            sentiment_df['DATE'] = pd.to_datetime(sentiment_df['DATE'])
+            
+            # Aggregate by month (average sentiment for each month)
+            sentiment_df['YEAR_MONTH'] = sentiment_df['DATE'].dt.to_period('M')
+            monthly_sentiment = sentiment_df.groupby('YEAR_MONTH')['SENTIMENT_SCORE'].mean().reset_index()
+            monthly_sentiment['YEAR_MONTH'] = monthly_sentiment['YEAR_MONTH'].astype(str)
+            
+            print(f"  Loaded sentiment for {len(monthly_sentiment)} months")
+            
+            # For now, use the average sentiment (can be extended to match date ranges)
+            avg_sentiment = sentiment_df['SENTIMENT_SCORE'].mean()
+            df['MACRO_SENTIMENT_SCORE'] = avg_sentiment
+            print(f"  Using average sentiment: {avg_sentiment:.3f}")
+        except Exception as e:
+            print(f"  Warning: Could not load sentiment from {sentiment_file}: {e}")
+            print(f"  Keeping MACRO_SENTIMENT_SCORE as 0.0 (neutral)")
+    else:
+        print(f"  Note: {sentiment_file} not found. Run external_features_manager.py first.")
+        print(f"  Keeping MACRO_SENTIMENT_SCORE as 0.0 (neutral)")
     
     # Our 3 LSTM feature vectors
     features = ['ZHVI_AllHomes_CLEAN', 'HISTORICAL_MORTGAGE_RATE', 'MACRO_SENTIMENT_SCORE']

@@ -5,9 +5,13 @@ import requests
 from functools import lru_cache
 import os
 from dotenv import load_dotenv
+import sys
 
 # Load environment variables from .env file (if it exists)
 load_dotenv()
+
+# Add src to path to import external_features_manager
+sys.path.insert(0, os.path.dirname(__file__))
 
 DEFAULT_EXTERNAL_FEATURE_MODE = os.getenv('EXTERNAL_FEATURE_MODE', 'live')  # Use real APIs when available
 OVERPASS_API_URL = os.getenv('OVERPASS_API_URL', 'https://overpass-api.de/api/interpreter')
@@ -52,7 +56,11 @@ def fetch_pois_from_overpass(lat, lon):
         out center;
         """
         
-        response = requests.post(OVERPASS_API_URL, data=query, timeout=10)
+        headers = {
+            'User-Agent': 'RealEstateMarketAnalyzer/1.0 (contact:dev@example.com)',
+            'Accept': 'application/json'
+        }
+        response = requests.post(OVERPASS_API_URL, data={'data': query}, headers=headers, timeout=10)
         response.raise_for_status()
         
         data = response.json()
@@ -182,67 +190,30 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 @lru_cache(maxsize=512)
-def fetch_crime_data_from_overpass(lat, lon, radius_meters=2000):
-    """Fetch police stations and crime-related POIs from Overpass API.
-    
-    Returns a crime index (0-100) based on proximity to police stations.
-    Higher index = more police presence = potentially safer area.
-    """
+def fetch_crime_data_by_zip(zip_code):
+    """Load crime index for a ZIP code from cache or fetch fresh if available."""
     try:
-        # Query for police stations, police stations, and sheriff offices within radius
-        query = f"""
-        [bbox:{lat-0.02},{lon-0.02},{lat+0.02},{lon+0.02}];
-        (
-          node["amenity"="police"];
-          way["amenity"="police"];
-          relation["amenity"="police"];
-        );
-        out center;
-        """
-        
-        response = requests.post(OVERPASS_API_URL, data=query, timeout=5)
-        response.raise_for_status()
-        
-        data = response.json()
-        elements = data.get('elements', [])
-        
-        if not elements:
-            return 50  # Default neutral score if no police stations found
-        
-        # Calculate proximity score based on closest police stations
-        closest_distance = float('inf')
-        for element in elements:
-            if 'lat' in element and 'lon' in element:
-                dist = haversine_distance(lat, lon, element['lat'], element['lon'])
-                closest_distance = min(closest_distance, dist)
-        
-        # Convert distance to safety score: closer = higher score
-        # 0.5 miles or closer = 100 (very safe)
-        # 5+ miles = 10 (less safe)
-        if closest_distance <= 0.5:
-            return 95
-        elif closest_distance <= 1.0:
-            return 80
-        elif closest_distance <= 2.0:
-            return 70
-        elif closest_distance <= 5.0:
-            return 50
-        else:
-            return 30
-            
+        # Try to load from cache first
+        if os.path.exists('data/zip_crime_lookup.csv'):
+            lookup_df = pd.read_csv('data/zip_crime_lookup.csv')
+            match = lookup_df[lookup_df['ZIP_CODE'].astype(str) == str(zip_code)]
+            if not match.empty:
+                return float(match.iloc[0]['CRIME_INDEX'])
     except Exception as e:
-        print(f"Warning: Could not fetch crime data from Overpass for ({lat}, {lon}): {e}")
-        # Fallback to simulated
-        np.random.seed(int(abs(lat * 1000))) 
-        return np.random.randint(10, 85)
+        print(f"  Warning: Could not load cached crime for ZIP {zip_code}: {e}")
+    
+    # Fallback: return neutral default
+    np.random.seed(int(float(zip_code)))
+    return float(np.random.randint(40, 80))
 
-def fetch_local_crime_index(lat, lon):
-    """Wrapper that tries live API then falls back to simulated."""
-    if DEFAULT_EXTERNAL_FEATURE_MODE == 'live':
-        return fetch_crime_data_from_overpass(lat, lon)
+def fetch_local_crime_index(lat, lon, zip_code=None):
+    """Wrapper: fetch crime by ZIP code if available, otherwise default."""
+    if zip_code is not None:
+        return fetch_crime_data_by_zip(str(zip_code))
     else:
-        np.random.seed(int(abs(lat * 1000))) 
-        return np.random.randint(10, 85)
+        # No ZIP available, use random default
+        np.random.seed(int(abs(lat * 1000)))
+        return float(np.random.randint(40, 80))
 
 def engineer_xgboost_vectors(df, user_poi_lat=32.9866, user_poi_lon=-96.7503):
     print("Engineering Dynamic Feature Vectors...")
@@ -297,14 +268,18 @@ def engineer_xgboost_vectors(df, user_poi_lat=32.9866, user_poi_lon=-96.7503):
     # Backward-compatible alias while migrating downstream code.
     df['DISTANCE_TO_POI'] = df['DISTANCE_TO_POI_SINGLE']
     
-    if DEFAULT_EXTERNAL_FEATURE_MODE == 'live':
-        print("Fetching live crime data from Overpass API...")
-    else:
-        print("Using simulated crime data...")
+    print("Loading crime data by ZIP code...")
     
-    df['LOCAL_CRIME_INDEX_SIM'] = df.apply(
-        lambda row: fetch_local_crime_index(row['LATITUDE'], row['LONGITUDE']), axis=1
-    )
+    # Use ZIP_CODE if available, otherwise fall back to lat/lon
+    if 'ZIP_CODE' in df.columns:
+        df['LOCAL_CRIME_INDEX_SIM'] = df.apply(
+            lambda row: fetch_local_crime_index(row['LATITUDE'], row['LONGITUDE'], zip_code=row.get('ZIP_CODE')), axis=1
+        )
+    else:
+        print("  Note: ZIP_CODE column not found, using lat/lon fallback")
+        df['LOCAL_CRIME_INDEX_SIM'] = df.apply(
+            lambda row: fetch_local_crime_index(row['LATITUDE'], row['LONGITUDE']), axis=1
+        )
 
     # Add market sentiment feature
     market_sentiment = fetch_market_sentiment()

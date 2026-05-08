@@ -150,7 +150,7 @@ def train_and_evaluate(df: pd.DataFrame, feature_set_name: str, feature_list, tu
             scoring='neg_mean_absolute_error',
             cv=3,
             verbose=1,
-            n_jobs=-1,
+            n_jobs=1,
             random_state=42,
             refit=True
         )
@@ -178,13 +178,29 @@ def train_and_evaluate(df: pd.DataFrame, feature_set_name: str, feature_list, tu
         {
             'objective': 'reg:squarederror',
             'random_state': 42,
-            'n_jobs': -1,
+            'n_jobs': 1,
             'early_stopping_rounds': EARLY_STOPPING_ROUNDS,
         }
     )
 
     model = XGBRegressor(**model_params)
-    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=10)
+    
+    # Save eval results for visualization
+    eval_results = model.evals_result()
+    if eval_results:
+        import json
+        history_dict = {
+            'val_mae': [float(x) for x in eval_results.get('validation_0', {}).get('rmse', [])]
+        }
+        history_path = f'models/xgboost_{feature_set_name}_eval_history.json'
+        with open(history_path, 'w') as f:
+            json.dump(history_dict, f, indent=2)
+
+    val_pred = np.expm1(model.predict(X_val))
+    val_true = np.expm1(y_val)
+    val_mae = mean_absolute_error(val_true, val_pred)
+    val_r2 = r2_score(val_true, val_pred)
 
     y_pred = np.expm1(model.predict(X_test))
     y_true = np.expm1(y_test)
@@ -196,6 +212,8 @@ def train_and_evaluate(df: pd.DataFrame, feature_set_name: str, feature_list, tu
         'features': usable_features,
         'rows_used': len(run_df),
         'cv_log_mae': cv_score,
+        'val_mae': val_mae,
+        'val_r2': val_r2,
         'mae': mae,
         'r2': r2,
         'params': chosen_params,
@@ -260,7 +278,7 @@ primary_result = train_and_evaluate(
     df,
     PRIMARY_FEATURE_SET,
     feature_sets[PRIMARY_FEATURE_SET],
-    tune=True,
+    tune=False,
 )
 
 if primary_result is None:
@@ -271,7 +289,9 @@ print("PRIMARY MODEL RESULTS")
 print("======================================")
 print(f"Feature Set ID: {primary_result['feature_set_id']}")
 print(f"Rows used: {primary_result['rows_used']}")
-print(f"Mean Absolute Error (MAE): ${primary_result['mae']:,.2f}")
+print(f"Validation MAE: ${primary_result['val_mae']:,.2f}")
+print(f"Validation R-squared: {primary_result['val_r2']:.4f}")
+print(f"Unseen Test MAE: ${primary_result['mae']:,.2f}")
 print(f"R-squared (Accuracy Score): {primary_result['r2']:.4f}")
 print("======================================\n")
 
@@ -314,6 +334,8 @@ metadata = {
     'feature_set_id': primary_result['feature_set_id'],
     'features': primary_result['features'],
     'rows_used': int(primary_result['rows_used']),
+    'val_mae': float(primary_result['val_mae']),
+    'val_r2': float(primary_result['val_r2']),
     'mae': float(primary_result['mae']),
     'r2': float(primary_result['r2']),
     'tuned_params': primary_result['params'],

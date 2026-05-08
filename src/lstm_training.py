@@ -180,7 +180,7 @@ tuner.search(
     epochs=50, 
     validation_data=(X_val, y_val), 
     callbacks=[early_stopping],
-    verbose=1
+    verbose=2
 )
 
 print("\nBest LSTM configuration selected:")
@@ -198,15 +198,29 @@ history = model.fit(
     verbose=1
 )
 
+# Save training history for visualization
+import json
+history_dict = {
+    'loss': [float(x) for x in history.history.get('loss', [])],
+    'val_loss': [float(x) for x in history.history.get('val_loss', [])]
+}
+with open('models/lstm_training_history.json', 'w') as f:
+    json.dump(history_dict, f, indent=2)
+print(f"Saved LSTM training history: models/lstm_training_history.json")
+
 # 5. Evaluate Accuracy
 print("\nGenerating Future Predictions...")
+y_val_pred = model.predict(X_val)
 y_pred = model.predict(X_test)
 
 # Because our data is scaled between 0 and 1, the MAE will be a small decimal.
 # In a full production app, we would inverse_transform this back into real dollars.
+val_mae = mean_absolute_error(y_val, y_val_pred)
 mae = mean_absolute_error(y_test, y_pred)
 print(f"\n======================================")
-print(f"LSTM Scaled Mean Absolute Error: {mae:.4f}")
+print(f"LSTM Validation Scaled Mean Absolute Error: {val_mae:.4f}")
+print(f"\n======================================")
+print(f"LSTM Unseen Test Scaled Mean Absolute Error: {mae:.4f}")
 print(f"======================================")
 print("(Note: A score closer to 0.0 means the predicted trend matches the actual trend perfectly.)\n")
 
@@ -228,7 +242,7 @@ lstm_feature_impact_path = 'models/lstm_feature_impact.csv'
 feature_impact_df.to_csv(lstm_feature_impact_path, index=False)
 print(f"Saved LSTM feature impact table: {lstm_feature_impact_path}")
 
-# 6. Visualize the Results (For the Professor/Team Meeting)
+# 6. Visualize the Results 
 print("Generating visualization chart...")
 plt.figure(figsize=(10, 6))
 plt.plot(y_test, label='Actual Market Trend', color='blue', linewidth=2)

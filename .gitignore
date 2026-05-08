@@ -21,6 +21,16 @@ env/
 kaggle.json
 *.env
 secrets.json
+.env.local
+.env.*
+# API keys and credentials
+*.key
+keys.json
+secrets.json
+
+# Optional local settings
+.vscode/
+local_settings.py
 
 # Large Data File
 *.zip
